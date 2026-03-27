@@ -1,0 +1,37 @@
+exchange:
+  api_url: "https://api.hyperliquid-testnet.xyz"
+  ws_url: "wss://api.hyperliquid-testnet.xyz/ws"
+  asset: "XMR1"
+  quote_asset: "USDC"
+
+trading:
+  cycle_interval_seconds: 2.0
+  order_levels: 3
+  level_sizes: [50.0, 100.0, 200.0]
+
+algorithm:
+  name: "avellaneda_stoikov"
+
+avellaneda_stoikov:
+  gamma_calm: 0.04
+  gamma_volatile: 0.08
+
+spread:
+  calm_spread_bps: 8.0
+  volatile_spread_bps: 25.0
+  level_spacing_bps: 4.0
+
+inventory:
+  max_position_xmr: 10.0
+  skew_factor: 0.5
+  target_position_xmr: 0.0
+
+risk:
+  daily_loss_limit_usdc: 50.0
+  max_drawdown_pct: 5.0
+  stale_feed_seconds: 5.0
+
+volatility:
+  window_minutes: 30
+  calm_threshold_bps: 20.0
+  volatile_threshold_bps: 35.0

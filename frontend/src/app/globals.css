@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body {
+  background-color: rgb(9, 9, 11); /* zinc-950 */
+  color: rgb(244, 244, 245); /* zinc-100 */
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: rgb(24, 24, 27); /* zinc-900 */
+}
+::-webkit-scrollbar-thumb {
+  background: rgb(63, 63, 70); /* zinc-700 */
+  border-radius: 3px;
+}
+
+.recharts-cartesian-grid line {
+  stroke: rgb(39, 39, 42) !important; /* zinc-800 */
+}

@@ -1,0 +1,28 @@
+# Dependencies (installed in container)
+node_modules
+
+# Build output (built in container)
+.next
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Dev config
+.eslintrc*
+.prettierrc*
+*.test.ts
+*.test.tsx
+__tests__
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode
+.idea
+
+# README
+*.md

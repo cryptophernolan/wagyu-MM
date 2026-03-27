@@ -1,0 +1,39 @@
+# Secrets — NEVER commit
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Data & logs (local runtime files)
+data/
+logs/
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/tsconfig.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude workspace
+.claude/

@@ -1,0 +1,54 @@
+# Git
+.git
+.gitignore
+
+# Python cache
+__pycache__
+*.py[cod]
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Virtual environments
+.venv
+venv
+env
+
+# Frontend build artifacts (built inside container)
+frontend/node_modules
+frontend/.next
+
+# Secrets — NEVER include in image
+.env
+.env.*
+!.env.example
+
+# Dev/test files
+tests/
+*.test.py
+
+# Logs (mounted as volume)
+logs/
+
+# SQLite DB (mounted as volume)
+data/
+
+# Docs
+*.md
+*.txt
+!requirements*.txt
+
+# IDE
+.vscode
+.idea
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker files themselves
+docker-compose*.yml
+Dockerfile*
+.dockerignore

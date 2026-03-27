@@ -1,0 +1,47 @@
+[tool.poetry]
+name = "wagyu-market-maker"
+version = "2.4.1"
+description = "Automated market maker bot for XMR1/USDC on Hyperliquid via Wagyu"
+authors = ["MarketMaker"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+hyperliquid-python-sdk = "*"
+fastapi = "^0.115.0"
+uvicorn = {extras = ["standard"], version = "^0.32.0"}
+sqlalchemy = {extras = ["asyncio"], version = "^2.0.0"}
+aiosqlite = "^0.20.0"
+pydantic = "^2.0.0"
+pydantic-settings = "^2.0.0"
+structlog = "^24.0.0"
+websockets = "^13.0.0"
+pyyaml = "^6.0"
+python-dotenv = "^1.0.0"
+numpy = ">=1.26.0"
+
+[tool.poetry.group.dev.dependencies]
+mypy = "^1.8.0"
+pytest = "^8.0.0"
+pytest-asyncio = "^0.23.0"
+httpx = "^0.28.1"
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+files = ["bot", "server", "scripts", "tests"]
+exclude = ["frontend"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
