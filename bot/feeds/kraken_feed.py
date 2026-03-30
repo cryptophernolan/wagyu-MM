@@ -80,3 +80,10 @@ class KrakenFeed(PriceFeed):
                         self._update_price(float(last))
                     except (ValueError, TypeError):
                         pass
+        elif channel == "heartbeat":
+            # Heartbeat confirms connection is alive. If we have a valid price,
+            # refresh last_updated so the feed doesn't go stale between trades.
+            # XMR/USDT is a low-volume pair on Kraken — trades may not arrive
+            # every 5 seconds, but the last known price is still valid.
+            if self._last_price is not None:
+                self._last_updated = time.time()

@@ -64,7 +64,7 @@ class OrderManager:
         if not requests:
             return 0
 
-        responses = self._client.bulk_place_orders(requests)
+        responses = await self._client.async_bulk_place_orders(requests)
         now = datetime.now(timezone.utc)
         placed = 0
         for resp in responses:
@@ -101,7 +101,7 @@ class OrderManager:
         if not self._open_orders:
             return 0
         oids = list(self._open_orders.keys())
-        success = self._client.bulk_cancel_orders(oids)
+        success = await self._client.async_bulk_cancel_orders(oids)
         if success:
             for oid in oids:
                 await repository.update_order_status(oid, "cancelled")

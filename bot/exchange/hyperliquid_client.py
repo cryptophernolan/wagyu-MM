@@ -1,6 +1,8 @@
 """Hyperliquid exchange client wrapping the official SDK."""
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
@@ -72,6 +74,10 @@ class HyperliquidClient:
         self._base_coin: str = base_coin if base_coin else asset.split("/")[0]
         self._exchange: Any = None
         self._info: Any = None
+        # User state cache — avoids a blocking REST call every cycle
+        self._user_state_cache: UserState | None = None
+        self._user_state_cache_ts: float = 0.0
+        self._user_state_cache_ttl: float = 10.0  # seconds
 
     def initialize(self) -> None:
         """Initialize SDK clients. Call once before using."""
@@ -145,8 +151,21 @@ class HyperliquidClient:
             logger.warning("get_open_orders failed", error=str(e))
             return []
 
+    def invalidate_user_state_cache(self) -> None:
+        """Force next get_user_state() call to fetch fresh data (call on fill)."""
+        self._user_state_cache = None
+
     def get_user_state(self) -> UserState:
-        """Fetch user spot balances and open orders via spotClearinghouseState."""
+        """Fetch user spot balances and open orders via spotClearinghouseState.
+        Results are cached for up to _user_state_cache_ttl seconds.
+        Call invalidate_user_state_cache() after a fill to get fresh balances.
+        """
+        now = time.monotonic()
+        if (
+            self._user_state_cache is not None
+            and (now - self._user_state_cache_ts) < self._user_state_cache_ttl
+        ):
+            return self._user_state_cache
         try:
             import requests as _requests
             raw: dict[str, Any] = _requests.post(
@@ -165,11 +184,14 @@ class HyperliquidClient:
                 elif coin == self._base_coin:
                     xmr_bal = total
             open_orders: list[dict[str, Any]] = self.get_open_orders()
-            return UserState(
+            result = UserState(
                 usdc_balance=usdc,
                 xmr_balance=xmr_bal,
                 open_orders=open_orders,
             )
+            self._user_state_cache = result
+            self._user_state_cache_ts = time.monotonic()
+            return result
         except Exception as e:
             logger.warning("get_user_state failed", error=str(e))
             return UserState(
@@ -233,6 +255,24 @@ class HyperliquidClient:
         except Exception as e:
             logger.error("bulk_place_orders failed", error=str(e))
             return []
+
+    # ── Async wrappers (run sync SDK calls in thread pool, non-blocking) ──────
+
+    async def async_get_user_state(self) -> UserState:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.get_user_state)
+
+    async def async_get_l2_book(self, asset: str | None = None) -> L2Book:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.get_l2_book, asset)
+
+    async def async_bulk_place_orders(self, orders: list[OrderRequest]) -> list[OrderResponse]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.bulk_place_orders, orders)
+
+    async def async_bulk_cancel_orders(self, oids: list[str]) -> bool:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self.bulk_cancel_orders, oids)
 
     def bulk_cancel_orders(self, oids: list[str]) -> bool:
         """Cancel multiple orders by oid."""

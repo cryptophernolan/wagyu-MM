@@ -136,6 +136,7 @@ class MarketMaker:
             is_maker = fill_data.get("liquidated", False) is False
 
             self._inventory.on_fill(side, price, size, fee)
+            self._client.invalidate_user_state_cache()  # Force fresh balance on next cycle
             self._state.fills_count += 1
 
             fair = float(self._fair_price)
@@ -186,14 +187,19 @@ class MarketMaker:
             logger.info("Cleared stale orders from previous session", count=cancelled)
             await asyncio.sleep(1.0)  # Allow exchange to release held balance
 
-        # Get initial portfolio value for drawdown tracking
-        user_state = self._client.get_user_state()
-        initial_portfolio = user_state.usdc_balance + (
-            user_state.xmr_balance * self._fair_price
-            if self._fair_price > Decimal("0")
-            else Decimal("0")
-        )
+        # Wait for a valid price before setting initial portfolio (up to 10s)
+        for _ in range(20):
+            raw_init = self._aggregator.get_price()
+            if raw_init is not None:
+                self._fair_price = Decimal(str(round(raw_init, 6)))
+                break
+            await asyncio.sleep(0.5)
+
+        # Get initial portfolio value for drawdown tracking (use actual wallet balances)
+        user_state = await self._client.async_get_user_state()
+        initial_portfolio = user_state.usdc_balance + user_state.xmr_balance * self._fair_price
         self._risk_manager.set_session_start_portfolio(initial_portfolio)
+        logger.info("Session start portfolio", value=float(initial_portfolio), fair_price=float(self._fair_price))
 
         self._state.state = "RUNNING"
         logger.info("MarketMaker running")
@@ -237,13 +243,13 @@ class MarketMaker:
         inv_ratio = self._inventory.inventory_ratio(max_pos)
         inv_skew = self._inventory.compute_skew(max_pos, self._config.inventory.skew_factor)
 
-        # 3. Compute PnL and portfolio value
+        # 3. Compute PnL and portfolio value (async — non-blocking, uses cache)
         realized_pnl = self._inventory.realized_pnl
         unrealized_pnl = self._inventory.compute_unrealized_pnl(self._fair_price)
-        user_state = self._client.get_user_state()
-        portfolio_value = (
-            user_state.usdc_balance + self._inventory.xmr_position * self._fair_price
-        )
+        user_state = await self._client.async_get_user_state()
+        # Use actual wallet balances for portfolio value (not session-tracked inventory)
+        # so drawdown check works correctly across restarts.
+        portfolio_value = user_state.usdc_balance + user_state.xmr_balance * self._fair_price
 
         # 4. Risk check
         risk_result = self._risk_manager.check_pre_cycle(
@@ -265,11 +271,11 @@ class MarketMaker:
         # 5. Cancel stale orders from previous cycle
         cancelled = await self._order_manager.cancel_all()
         if cancelled > 0:
-            await asyncio.sleep(0.2)  # Let exchange release held balance
+            await asyncio.sleep(0.05)  # Brief yield; cancel is confirmed before returning
 
         # 6. Place new quotes (if quoting and wagyu are enabled)
         if self._state.quoting_enabled and self._state.wagyu_enabled:
-            l2_book = self._client.get_l2_book()
+            l2_book = await self._client.async_get_l2_book()
             l2_bids = [(b.price, b.size) for b in l2_book.bids]
             l2_asks = [(a.price, a.size) for a in l2_book.asks]
 
