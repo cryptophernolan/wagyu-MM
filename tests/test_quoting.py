@@ -13,6 +13,7 @@ from bot.config import (
     EnvConfig,
     ExchangeConfig,
     InventoryConfig,
+    RateLimitConfig,
     RiskConfig,
     SpreadConfig,
     TradingConfig,
@@ -50,6 +51,7 @@ def make_config(algo_name: str = "simple_spread") -> AppConfig:
         volatility=VolatilityConfig(
             window_minutes=30, calm_threshold_bps=20.0, volatile_threshold_bps=35.0
         ),
+        rate_limit=RateLimitConfig(),
         env=EnvConfig(hl_private_key="", hl_wallet_address=""),
     )
 

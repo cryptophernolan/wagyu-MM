@@ -70,6 +70,18 @@ class VolatilityConfig(BaseSettings):
     volatile_threshold_bps: float = 35.0
 
 
+class RateLimitConfig(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")
+    # Only refresh quotes when price moves beyond this threshold (bps).
+    # Reduces Hyperliquid order ops from ~500k/day to ~1-3k/day.
+    deadband_bps: float = 5.0
+    # Force a refresh at least every N seconds even if price is flat.
+    max_refresh_interval_seconds: float = 60.0
+    # Use modify-in-place (1 op) instead of cancel+place (2 ops) per order.
+    # Set false if the SDK version does not support modify_order.
+    use_order_modify: bool = True
+
+
 class EnvConfig(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     hl_private_key: str = ""
@@ -91,6 +103,7 @@ class AppConfig:
         inventory: InventoryConfig,
         risk: RiskConfig,
         volatility: VolatilityConfig,
+        rate_limit: RateLimitConfig,
         env: EnvConfig,
     ) -> None:
         self.exchange = exchange
@@ -101,6 +114,7 @@ class AppConfig:
         self.inventory = inventory
         self.risk = risk
         self.volatility = volatility
+        self.rate_limit = rate_limit
         self.env = env
 
 
@@ -131,5 +145,6 @@ def load_config(config_path: str = "config/config.yaml") -> AppConfig:
         inventory=InventoryConfig(**raw.get("inventory", {})),
         risk=RiskConfig(**raw.get("risk", {})),
         volatility=VolatilityConfig(**raw.get("volatility", {})),
+        rate_limit=RateLimitConfig(**raw.get("rate_limit", {})),
         env=env_cfg,
     )

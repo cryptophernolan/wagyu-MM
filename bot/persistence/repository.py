@@ -107,6 +107,17 @@ async def update_order_status(oid: str, status: str) -> None:
             order.updated_at = datetime.now(tz=timezone.utc)
 
 
+async def update_order_price(oid: str, price: float, size: float) -> None:
+    """Update price and size of an existing order after a modify-in-place operation."""
+    async with get_session() as session:
+        result = await session.execute(select(Order).where(Order.oid == oid))
+        order = result.scalar_one_or_none()
+        if order is not None:
+            order.price = price
+            order.size = size
+            order.updated_at = datetime.now(tz=timezone.utc)
+
+
 async def get_open_orders() -> list[dict[str, Any]]:
     """Return all orders with status='open', ordered by creation time descending."""
     async with get_session() as session:

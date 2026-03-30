@@ -36,6 +36,19 @@ class OrderResponse:
 
 
 @dataclass
+class ModifyRequest:
+    """A single in-place order modification (price/size change, same oid)."""
+    oid: str
+    side: str  # "buy" | "sell"
+    price: Decimal
+    size: Decimal
+    is_buy: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.is_buy = self.side == "buy"
+
+
+@dataclass
 class L2Level:
     price: Decimal
     size: Decimal
@@ -255,6 +268,51 @@ class HyperliquidClient:
         except Exception as e:
             logger.error("bulk_place_orders failed", error=str(e))
             return []
+
+    def modify_order_sync(self, modify: ModifyRequest) -> bool:
+        """Modify a single open order in place (price/size). Uses 1 API op vs 2 for cancel+place."""
+        if not hasattr(self._exchange, "modify_order"):
+            logger.warning("SDK does not support modify_order; use_order_modify should be false")
+            return False
+        try:
+            order_spec: dict[str, Any] = {
+                "coin": self._asset,
+                "is_buy": modify.is_buy,
+                "sz": float(modify.size),
+                "limit_px": float(modify.price),
+                "order_type": {"limit": {"tif": "Alo"}},
+                "reduce_only": False,
+            }
+            raw_result: Any = self._exchange.modify_order(int(modify.oid), order_spec)
+            if isinstance(raw_result, dict) and raw_result.get("status") == "ok":
+                return True
+            # Some SDK versions return the full response structure
+            if isinstance(raw_result, dict):
+                resp = raw_result.get("response", {})
+                statuses: list[Any] = resp.get("data", {}).get("statuses", [])
+                if statuses and "resting" in statuses[0]:
+                    return True
+                if raw_result.get("status") != "err":
+                    return True  # treat non-error as success
+            logger.warning("modify_order unexpected result", result=str(raw_result)[:200])
+            return False
+        except Exception as e:
+            logger.warning("modify_order_sync failed", oid=modify.oid, error=str(e))
+            return False
+
+    async def async_bulk_modify_orders(self, modifies: list[ModifyRequest]) -> bool:
+        """Concurrently modify multiple open orders in place. Returns True if all succeeded."""
+        if not modifies:
+            return True
+        loop = asyncio.get_event_loop()
+        tasks = [loop.run_in_executor(None, self.modify_order_sync, m) for m in modifies]
+        results: list[bool] = list(await asyncio.gather(*tasks))
+        failed = sum(1 for r in results if not r)
+        if failed:
+            logger.warning("bulk_modify: some modifies failed", failed=failed, total=len(modifies))
+            return False
+        logger.debug("bulk_modify OK", count=len(modifies))
+        return True
 
     # ── Async wrappers (run sync SDK calls in thread pool, non-blocking) ──────
 

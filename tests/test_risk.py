@@ -11,6 +11,7 @@ from bot.config import (
     EnvConfig,
     ExchangeConfig,
     InventoryConfig,
+    RateLimitConfig,
     RiskConfig,
     SpreadConfig,
     TradingConfig,
@@ -34,6 +35,7 @@ def make_config() -> AppConfig:
             daily_loss_limit_usdc=50.0, max_drawdown_pct=5.0, stale_feed_seconds=5.0
         ),
         volatility=VolatilityConfig(),
+        rate_limit=RateLimitConfig(),
         env=EnvConfig(hl_private_key="", hl_wallet_address=""),
     )
 

@@ -56,6 +56,7 @@ async def main() -> None:
         private_key=config.env.hl_private_key,
         wallet_address=config.env.hl_wallet_address,
         asset=config.exchange.asset,
+        base_coin=config.exchange.base_coin,
     )
     client.initialize()
 

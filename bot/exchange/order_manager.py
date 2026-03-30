@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 from bot.engine.algorithms.base import QuoteSet
-from bot.exchange.hyperliquid_client import HyperliquidClient, OrderRequest
+from bot.exchange.hyperliquid_client import HyperliquidClient, ModifyRequest, OrderRequest
 from bot.persistence import repository
 from bot.utils.logger import get_logger
 
@@ -96,6 +96,64 @@ class OrderManager:
         )
         return placed
 
+    async def modify_or_replace_quotes(
+        self,
+        quote_set: QuoteSet,
+        fair_price: Decimal,
+        use_modify: bool = True,
+    ) -> int:
+        """Place quotes using modify-in-place when possible, else cancel+replace.
+
+        Modify-in-place uses 1 API op per order (vs 2 for cancel+place), saving
+        ~50% of Hyperliquid order weight budget per refresh cycle.
+
+        Falls back to cancel+replace when:
+        - use_modify is False (config opt-out)
+        - No existing open orders to modify
+        - Level count changed (e.g. regime switch CALM→VOLATILE reduces levels)
+        - The bulk modify call fails (SDK error, order already filled, etc.)
+        """
+        existing_bids = sorted(
+            [o for o in self._open_orders.values() if o.side == "buy"],
+            key=lambda o: o.price,
+            reverse=True,  # best bid (highest) first — matches quote_set.bids order
+        )
+        existing_asks = sorted(
+            [o for o in self._open_orders.values() if o.side == "sell"],
+            key=lambda o: o.price,  # best ask (lowest) first — matches quote_set.asks order
+        )
+
+        can_modify = (
+            use_modify
+            and bool(self._open_orders)
+            and len(existing_bids) == len(quote_set.bids)
+            and len(existing_asks) == len(quote_set.asks)
+        )
+
+        if can_modify:
+            modifies: list[ModifyRequest] = []
+            for old, new_level in zip(existing_bids, quote_set.bids):
+                modifies.append(ModifyRequest(oid=old.oid, side="buy", price=new_level.price, size=new_level.size))
+            for old, new_level in zip(existing_asks, quote_set.asks):
+                modifies.append(ModifyRequest(oid=old.oid, side="sell", price=new_level.price, size=new_level.size))
+
+            success = await self._client.async_bulk_modify_orders(modifies)
+            if success:
+                # Update tracked prices/sizes in place (oids remain the same)
+                for mod in modifies:
+                    if mod.oid in self._open_orders:
+                        self._open_orders[mod.oid].price = mod.price
+                        self._open_orders[mod.oid].size = mod.size
+                        await repository.update_order_price(mod.oid, float(mod.price), float(mod.size))
+                logger.debug("Modified quotes in place", count=len(modifies))
+                return len(modifies)
+            # Modify failed — fall through to cancel+replace
+            logger.debug("modify_or_replace: modify failed, falling back to cancel+replace")
+
+        # Standard cancel+replace path
+        await self.cancel_all()
+        return await self.place_quotes(quote_set, fair_price)
+
     async def cancel_all(self) -> int:
         """Cancel all tracked open orders. Returns count cancelled."""
         if not self._open_orders:
@@ -113,11 +171,11 @@ class OrderManager:
     async def cancel_all_exchange_orders(self) -> int:
         """Cancel ALL open orders on the exchange (including from previous sessions)."""
         try:
-            user_state = self._client.get_user_state()
+            user_state = await self._client.async_get_user_state()
             stale_oids = [str(o["oid"]) for o in user_state.open_orders]
             if not stale_oids:
                 return 0
-            self._client.bulk_cancel_orders(stale_oids)
+            await self._client.async_bulk_cancel_orders(stale_oids)
             self._open_orders.clear()
             logger.info("Cancelled stale exchange orders on startup", count=len(stale_oids))
             return len(stale_oids)

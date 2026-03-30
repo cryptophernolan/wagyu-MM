@@ -88,6 +88,11 @@ class MarketMaker:
         self._running = False
         self._fair_price: Decimal = Decimal("0")
 
+        # Dead-band rate-limit tracking
+        self._last_quoted_price: Decimal = Decimal("0")
+        self._last_refresh_time: float = 0.0
+        self._force_refresh: bool = False  # set True on fill to bypass dead-band
+
     def add_event_listener(self, cb: EventCallback) -> None:
         self._event_listeners.append(cb)
 
@@ -123,6 +128,32 @@ class MarketMaker:
         logger.info("Inv limit toggled", enabled=self._state.inv_limit_enabled)
         return self._state.inv_limit_enabled
 
+    def _should_refresh(self, fair_price: Decimal) -> bool:
+        """Return True if quotes should be refreshed this cycle.
+
+        Refresh is triggered when ANY of these is true:
+        1. _force_refresh flag (set after a fill — inventory changed)
+        2. No open orders exist (bot just started or halted)
+        3. Timer fallback: max_refresh_interval_seconds elapsed (keeps quotes from going stale)
+        4. Dead-band crossed: price moved > deadband_bps from last quoted price
+        """
+        if self._force_refresh:
+            return True
+        if not self._order_manager.get_open_orders():
+            return True
+        elapsed = time.monotonic() - self._last_refresh_time
+        if elapsed >= self._config.rate_limit.max_refresh_interval_seconds:
+            return True
+        if self._last_quoted_price > Decimal("0"):
+            move_bps = (
+                abs(fair_price - self._last_quoted_price)
+                / self._last_quoted_price
+                * Decimal("10000")
+            )
+            if float(move_bps) >= self._config.rate_limit.deadband_bps:
+                return True
+        return False
+
     def _on_fill(self, fill_data: dict[str, Any]) -> None:
         """Handle fill event from WebSocket."""
         try:
@@ -137,6 +168,7 @@ class MarketMaker:
 
             self._inventory.on_fill(side, price, size, fee)
             self._client.invalidate_user_state_cache()  # Force fresh balance on next cycle
+            self._force_refresh = True  # Inventory changed → bypass dead-band next cycle
             self._state.fills_count += 1
 
             fair = float(self._fair_price)
@@ -265,32 +297,49 @@ class MarketMaker:
             self._state.halt_reason = self._risk_manager.halt_reason or risk_result.reason
             self._state.fair_price = float(self._fair_price)  # Show price even when halted
             await self._order_manager.cancel_all()
+            self._last_quoted_price = Decimal("0")  # Force fresh quotes on un-halt
             self._emit(self._build_state_event())
             return
 
-        # 5. Cancel stale orders from previous cycle
-        cancelled = await self._order_manager.cancel_all()
-        if cancelled > 0:
-            await asyncio.sleep(0.05)  # Brief yield; cancel is confirmed before returning
+        # 5. Manage quotes: cancel if disabled, or refresh if dead-band crossed / fill received
+        if not self._state.quoting_enabled or not self._state.wagyu_enabled:
+            # Quoting just toggled off — cancel any resting orders
+            cancelled = await self._order_manager.cancel_all()
+            if cancelled > 0:
+                self._last_quoted_price = Decimal("0")  # Force fresh quotes on re-enable
+        else:
+            # 5a. Dead-band gate: skip order refresh if price hasn't moved enough
+            should_refresh = self._should_refresh(self._fair_price)
+            if should_refresh:
+                l2_book = await self._client.async_get_l2_book()
+                l2_bids = [(b.price, b.size) for b in l2_book.bids]
+                l2_asks = [(a.price, a.size) for a in l2_book.asks]
 
-        # 6. Place new quotes (if quoting and wagyu are enabled)
-        if self._state.quoting_enabled and self._state.wagyu_enabled:
-            l2_book = await self._client.async_get_l2_book()
-            l2_bids = [(b.price, b.size) for b in l2_book.bids]
-            l2_asks = [(a.price, a.size) for a in l2_book.asks]
+                quote_set = self._quote_calculator.compute_quotes(
+                    fair_price=self._fair_price,
+                    regime=regime,
+                    sigma=sigma,
+                    inventory=self._inventory.xmr_position,
+                    inv_skew=inv_skew,
+                    l2_bids=l2_bids,
+                    l2_asks=l2_asks,
+                )
+                # 5b. Use modify-in-place when possible (saves ~50% API ops vs cancel+place)
+                await self._order_manager.modify_or_replace_quotes(
+                    quote_set,
+                    self._fair_price,
+                    use_modify=self._config.rate_limit.use_order_modify,
+                )
+                self._last_quoted_price = self._fair_price
+                self._last_refresh_time = time.monotonic()
+                self._force_refresh = False
+            else:
+                logger.debug(
+                    "Skipping quote refresh (dead-band)",
+                    deadband_bps=self._config.rate_limit.deadband_bps,
+                )
 
-            quote_set = self._quote_calculator.compute_quotes(
-                fair_price=self._fair_price,
-                regime=regime,
-                sigma=sigma,
-                inventory=self._inventory.xmr_position,
-                inv_skew=inv_skew,
-                l2_bids=l2_bids,
-                l2_asks=l2_asks,
-            )
-            await self._order_manager.place_quotes(quote_set, self._fair_price)
-
-        # 7. Save price and PnL snapshots
+        # 6. Save price and PnL snapshots
         open_orders = self._order_manager.get_open_orders()
         await repository.save_price_snapshot({
             "timestamp": datetime.now(timezone.utc),
