@@ -91,6 +91,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     dependencies.set_bot(bot)
     dependencies.set_ws_hub(_hub)
 
+    # Start autonomous health monitoring agents
+    from bot.agents.agent_runner import AgentRunner
+    from bot.agents.cycle_watchdog import CycleWatchdogAgent
+    from bot.agents.exchange_probe import ExchangeProbeAgent
+    from bot.agents.order_integrity import OrderIntegrityAgent
+    from bot.agents.quote_activity import QuoteActivityAgent
+
+    # AgentRunner needs a placeholder callback; agents wire themselves in __init__
+    _agent_runner = AgentRunner(
+        agents=[],  # filled below after runner is created
+        bot=bot,
+        broadcast=_hub.broadcast,
+    )
+    _agent_runner._agents = [
+        CycleWatchdogAgent(bot, config, on_report=_agent_runner._on_report),
+        OrderIntegrityAgent(bot, client, order_manager, config, on_report=_agent_runner._on_report),
+        QuoteActivityAgent(bot, config, on_report=_agent_runner._on_report),
+        ExchangeProbeAgent(bot, client, on_report=_agent_runner._on_report),
+    ]
+    await _agent_runner.start()
+    dependencies.set_agent_runner(_agent_runner)
+
     global _bot_task
     _bot_task = asyncio.create_task(bot.run())
 
@@ -98,6 +120,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     yield
 
     logger.info("FastAPI server shutting down")
+    await _agent_runner.stop()
     await bot.shutdown()
     if _bot_task is not None:
         _bot_task.cancel()

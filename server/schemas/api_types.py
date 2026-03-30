@@ -156,3 +156,16 @@ class ReportSummary(BaseModel):
 class DailyReportResponse(BaseModel):
     rows: list[DailyPnLRow]
     summary: ReportSummary
+
+
+class AgentReportItem(BaseModel):
+    agent: str
+    status: str  # "OK" | "WARN" | "CRITICAL" | "UNKNOWN"
+    message: str
+    timestamp: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentHealthResponse(BaseModel):
+    overall: str  # worst status across all agents
+    agents: list[AgentReportItem]

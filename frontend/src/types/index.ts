@@ -101,9 +101,23 @@ export interface Portfolio {
   xmr_price: number;
 }
 
+export interface AgentHealthItem {
+  agent: string;
+  status: "OK" | "WARN" | "CRITICAL" | "UNKNOWN";
+  message: string;
+  timestamp: string;
+  details: Record<string, unknown>;
+}
+
+export interface AgentHealthResponse {
+  overall: "OK" | "WARN" | "CRITICAL" | "UNKNOWN";
+  agents: AgentHealthItem[];
+}
+
 // WebSocket event discriminated union
 export type WsEvent =
   | { type: "state_update"; data: BotStatus }
   | { type: "fill_event"; data: { side: string; price: number; size: number; fee: number } }
   | { type: "order_event"; data: Order }
-  | { type: "alert_event"; data: { message: string } };
+  | { type: "alert_event"; data: { message: string } }
+  | { type: "agent_report"; data: AgentHealthItem };

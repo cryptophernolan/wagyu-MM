@@ -1,6 +1,6 @@
 // Typed REST fetch helpers for all API endpoints
 
-import type { BotStatus, DailyPnLRow, Fill, Order, Portfolio, PricePoint, PnLPoint, ReportSummary } from "@/types";
+import type { AgentHealthResponse, BotStatus, DailyPnLRow, Fill, Order, Portfolio, PricePoint, PnLPoint, ReportSummary } from "@/types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
@@ -52,4 +52,8 @@ export async function toggleFeature(target: string): Promise<{ target: string; e
   const res = await fetch(`${API_BASE}/api/toggle/${target}`, { method: "POST" });
   if (!res.ok) throw new Error(`Toggle error ${res.status}`);
   return res.json() as Promise<{ target: string; enabled: boolean }>;
+}
+
+export async function fetchAgentHealth(): Promise<AgentHealthResponse> {
+  return apiFetch<AgentHealthResponse>("/api/health/agents");
 }

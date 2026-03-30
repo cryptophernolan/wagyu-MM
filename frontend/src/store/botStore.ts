@@ -1,18 +1,20 @@
 "use client";
 import { create } from "zustand";
-import type { BotStatus, Fill, Order, WsEvent } from "@/types";
+import type { AgentHealthItem, BotStatus, Fill, Order, WsEvent } from "@/types";
 
 interface BotStore {
   status: BotStatus | null;
   recentFills: Fill[];
   openOrders: Order[];
   alerts: string[];
+  agentReports: Record<string, AgentHealthItem>;
   connected: boolean;
   setStatus: (status: BotStatus) => void;
   addFill: (fill: Fill) => void;
   setOrders: (orders: Order[]) => void;
   addAlert: (msg: string) => void;
   setConnected: (v: boolean) => void;
+  updateAgentReport: (report: AgentHealthItem) => void;
   processWsEvent: (event: WsEvent) => void;
 }
 
@@ -21,6 +23,7 @@ export const useBotStore = create<BotStore>((set, get) => ({
   recentFills: [],
   openOrders: [],
   alerts: [],
+  agentReports: {},
   connected: false,
 
   setStatus: (status) => set({ status }),
@@ -30,6 +33,8 @@ export const useBotStore = create<BotStore>((set, get) => ({
   addAlert: (msg) =>
     set((s) => ({ alerts: [msg, ...s.alerts].slice(0, 50) })),
   setConnected: (v) => set({ connected: v }),
+  updateAgentReport: (report) =>
+    set((s) => ({ agentReports: { ...s.agentReports, [report.agent]: report } })),
 
   processWsEvent: (event) => {
     const store = get();
@@ -42,6 +47,13 @@ export const useBotStore = create<BotStore>((set, get) => ({
         break;
       case "alert_event":
         store.addAlert(event.data.message);
+        break;
+      case "agent_report":
+        store.updateAgentReport(event.data);
+        // Surface degraded agent status as an alert
+        if (event.data.status === "CRITICAL" || event.data.status === "WARN") {
+          store.addAlert(`[${event.data.agent.toUpperCase()}] ${event.data.message}`);
+        }
         break;
       default:
         break;

@@ -107,6 +107,93 @@ Mỗi cycle (~3 giây):
 
 ---
 
+---
+
+---
+
+# Rollback Guide — Autonomous Agent Health Monitoring
+
+**Git tag:** `v2.4.1-pre-agents`
+**Created:** 2026-03-30
+**What it captures:** Complete codebase state before adding the autonomous agent health monitoring system.
+
+## What Was Added (Changes to Undo)
+
+| File | Change Type |
+|------|------------|
+| `bot/agents/__init__.py` | NEW |
+| `bot/agents/base_agent.py` | NEW |
+| `bot/agents/cycle_watchdog.py` | NEW |
+| `bot/agents/order_integrity.py` | NEW |
+| `bot/agents/quote_activity.py` | NEW |
+| `bot/agents/exchange_probe.py` | NEW |
+| `bot/agents/agent_runner.py` | NEW |
+| `server/schemas/api_types.py` | MODIFIED |
+| `server/dependencies.py` | MODIFIED |
+| `server/routers/health.py` | MODIFIED |
+| `server/main.py` | MODIFIED |
+| `frontend/src/types/index.ts` | MODIFIED |
+| `frontend/src/lib/api.ts` | MODIFIED |
+| `frontend/src/store/botStore.ts` | MODIFIED |
+| `frontend/src/components/tabs/HealthTab.tsx` | MODIFIED |
+
+## Rollback Options
+
+### Option A — Full rollback to exact pre-agent state (recommended)
+
+```bash
+# 1. Stop running containers first
+docker compose down
+
+# 2. Reset code to the backup tag
+git checkout v2.4.1-pre-agents
+
+# 3. Rebuild and restart
+docker compose build
+docker compose up -d
+```
+
+### Option B — Restore specific server/frontend files only
+
+```bash
+# Restore only the backend agent wiring
+git checkout v2.4.1-pre-agents -- server/main.py server/schemas/api_types.py \
+  server/dependencies.py server/routers/health.py
+
+# Restore frontend
+git checkout v2.4.1-pre-agents -- frontend/src/types/index.ts \
+  frontend/src/lib/api.ts frontend/src/store/botStore.ts \
+  frontend/src/components/tabs/HealthTab.tsx
+
+# Remove new agent module
+rm -rf bot/agents/
+
+# Rebuild
+docker compose build backend frontend
+docker compose up -d --no-deps backend frontend
+```
+
+### Option C — Disable agents without code change
+
+Set `agents.enabled: false` in `config/config.yaml`:
+
+```yaml
+agents:
+  enabled: false
+```
+
+Then restart: `docker compose restart backend`
+
+## Verify Rollback
+
+```bash
+docker compose ps
+# /api/health/agents should return 404
+curl -s -o /dev/null -w "%{http_code}" http://localhost:8000/api/health/agents
+```
+
+---
+
 ## Tuning tham số rate_limit
 
 Chỉnh trong `config/config.yaml`:

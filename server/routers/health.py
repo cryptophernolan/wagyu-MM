@@ -6,9 +6,16 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
+from bot.agents.agent_runner import AgentRunner
 from bot.engine.market_maker import MarketMaker
-from server.dependencies import get_bot
-from server.schemas.api_types import FeedHealthItem, HealthErrorEntry, HealthResponse
+from server.dependencies import get_agent_runner, get_bot
+from server.schemas.api_types import (
+    AgentHealthResponse,
+    AgentReportItem,
+    FeedHealthItem,
+    HealthErrorEntry,
+    HealthResponse,
+)
 
 router = APIRouter(prefix="/api", tags=["health"])
 
@@ -35,3 +42,15 @@ async def get_health(mm: Annotated[MarketMaker, Depends(_get_mm)]) -> HealthResp
         for alert in s.alerts[-20:]
     ]
     return HealthResponse(feeds=feeds, errors=errors)
+
+
+@router.get("/health/agents", response_model=AgentHealthResponse)
+async def get_agent_health(
+    runner: Annotated[AgentRunner, Depends(get_agent_runner)],
+) -> AgentHealthResponse:
+    """Return the latest health report from each autonomous monitoring agent."""
+    raw = runner.get_reports()
+    return AgentHealthResponse(
+        overall=runner.get_overall_status(),
+        agents=[AgentReportItem(**r) for r in raw],
+    )
