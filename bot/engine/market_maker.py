@@ -395,10 +395,12 @@ class MarketMaker:
             "type": "state_update",
             "data": {
                 "state": s.state,
-                "feeds_enabled": s.feeds_enabled,
-                "wagyu_enabled": s.wagyu_enabled,
-                "quoting_enabled": s.quoting_enabled,
-                "inv_limit_enabled": s.inv_limit_enabled,
+                "toggles": {
+                    "feeds": s.feeds_enabled,
+                    "wagyu": s.wagyu_enabled,
+                    "quoting": s.quoting_enabled,
+                    "inv_limit": s.inv_limit_enabled,
+                },
                 "cycle_count": s.cycle_count,
                 "last_cycle_ms": s.last_cycle_ms,
                 "fills_count": s.fills_count,
