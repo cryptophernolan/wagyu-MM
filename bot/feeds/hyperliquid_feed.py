@@ -44,7 +44,10 @@ class HyperliquidFeed(PriceFeed):
         backoff = 1.0
         while self._running:
             try:
-                async with websockets.connect(self._ws_url) as ws:
+                async with websockets.connect(
+                    self._ws_url,
+                    ping_interval=None,
+                ) as ws:
                     backoff = 1.0
                     subscribe_msg = json.dumps({
                         "method": "subscribe",
@@ -52,14 +55,18 @@ class HyperliquidFeed(PriceFeed):
                     })
                     await ws.send(subscribe_msg)
                     logger.info("HyperliquidFeed connected", ws_url=self._ws_url)
-                    async for raw in ws:
-                        if not self._running:
-                            break
+                    while self._running:
                         try:
-                            msg: dict[str, Any] = json.loads(raw)
-                            self._handle_message(msg)
-                        except (json.JSONDecodeError, KeyError) as e:
-                            logger.warning("HyperliquidFeed parse error", error=str(e))
+                            raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                            try:
+                                msg: dict[str, Any] = json.loads(raw)
+                                self._handle_message(msg)
+                            except (json.JSONDecodeError, KeyError) as e:
+                                logger.warning("HyperliquidFeed parse error", error=str(e))
+                        except asyncio.TimeoutError:
+                            # allMids normally streams every few seconds; 30 s timeout
+                            # indicates the connection is silently dead — ping to check.
+                            await ws.send(json.dumps({"method": "ping"}))
             except (ConnectionClosed, OSError, asyncio.TimeoutError) as e:
                 if not self._running:
                     break
@@ -78,3 +85,9 @@ class HyperliquidFeed(PriceFeed):
                     self._update_price(float(price_str))
                 except ValueError:
                     pass
+            else:
+                # allMids received but asset not in this batch — server skips unchanged mids.
+                # Connection is alive, so keep last_updated fresh (same as KrakenFeed heartbeat).
+                if self._last_price is not None:
+                    import time as _time
+                    self._last_updated = _time.time()

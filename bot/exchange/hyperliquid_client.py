@@ -64,6 +64,8 @@ class L2Book:
 class UserState:
     usdc_balance: Decimal
     xmr_balance: Decimal
+    usdc_available: Decimal   # usdc_balance - amount held in open bid orders
+    xmr_available: Decimal    # xmr_balance  - amount held in open ask orders
     open_orders: list[dict[str, Any]]
 
 
@@ -95,9 +97,16 @@ class HyperliquidClient:
     def initialize(self) -> None:
         """Initialize SDK clients. Call once before using."""
         try:
+            import socket as _socket
             import eth_account
             from hyperliquid.exchange import Exchange  # type: ignore[import-untyped]
             from hyperliquid.info import Info  # type: ignore[import-untyped]
+
+            # Set global socket timeout so SDK HTTP calls (which have no built-in
+            # timeout) cannot block a thread-pool thread for more than 10 seconds.
+            # Without this, a slow exchange API hangs the thread, saturates the
+            # executor pool, and causes the asyncio event loop to appear frozen.
+            _socket.setdefaulttimeout(10.0)
 
             account = eth_account.Account.from_key(self._private_key)
             base_url = self._api_url
@@ -188,18 +197,25 @@ class HyperliquidClient:
             ).json()
             balances_list: list[dict[str, Any]] = raw.get("balances", [])
             usdc = Decimal("0")
+            usdc_hold = Decimal("0")
             xmr_bal = Decimal("0")
+            xmr_hold = Decimal("0")
             for b in balances_list:
                 coin = b.get("coin", "")
                 total = Decimal(str(b.get("total", "0")))
+                hold = Decimal(str(b.get("hold", "0")))
                 if coin == "USDC":
                     usdc = total
+                    usdc_hold = hold
                 elif coin == self._base_coin:
                     xmr_bal = total
+                    xmr_hold = hold
             open_orders: list[dict[str, Any]] = self.get_open_orders()
             result = UserState(
                 usdc_balance=usdc,
                 xmr_balance=xmr_bal,
+                usdc_available=max(Decimal("0"), usdc - usdc_hold),
+                xmr_available=max(Decimal("0"), xmr_bal - xmr_hold),
                 open_orders=open_orders,
             )
             self._user_state_cache = result
@@ -210,6 +226,8 @@ class HyperliquidClient:
             return UserState(
                 usdc_balance=Decimal("0"),
                 xmr_balance=Decimal("0"),
+                usdc_available=Decimal("0"),
+                xmr_available=Decimal("0"),
                 open_orders=[],
             )
 
@@ -275,62 +293,168 @@ class HyperliquidClient:
             logger.warning("SDK does not support modify_order; use_order_modify should be false")
             return False
         try:
-            order_spec: dict[str, Any] = {
-                "coin": self._asset,
-                "is_buy": modify.is_buy,
-                "sz": float(modify.size),
-                "limit_px": float(modify.price),
-                "order_type": {"limit": {"tif": "Alo"}},
-                "reduce_only": False,
-            }
-            raw_result: Any = self._exchange.modify_order(int(modify.oid), order_spec)
-            if isinstance(raw_result, dict) and raw_result.get("status") == "ok":
+            # SDK signature: modify_order(oid, name, is_buy, sz, limit_px, order_type, ...)
+            raw_result: Any = self._exchange.modify_order(
+                int(modify.oid),
+                self._asset,
+                modify.is_buy,
+                float(modify.size),
+                float(modify.price),
+                {"limit": {"tif": "Alo"}},
+            )
+            if not isinstance(raw_result, dict):
+                logger.warning("modify_order unexpected result", result=str(raw_result)[:200])
+                return False
+            if raw_result.get("status") == "ok":
                 return True
-            # Some SDK versions return the full response structure
-            if isinstance(raw_result, dict):
-                resp = raw_result.get("response", {})
+            # Parse statuses array — response may be a string on error (e.g. rate-limit
+            # or order-not-found), so guard with isinstance before calling .get()
+            resp: Any = raw_result.get("response", {})
+            if isinstance(resp, dict):
                 statuses: list[Any] = resp.get("data", {}).get("statuses", [])
-                if statuses and "resting" in statuses[0]:
+                if statuses and isinstance(statuses[0], dict) and "resting" in statuses[0]:
                     return True
-                if raw_result.get("status") != "err":
-                    return True  # treat non-error as success
-            logger.warning("modify_order unexpected result", result=str(raw_result)[:200])
+            # Any non-err response is treated as success
+            if raw_result.get("status") != "err":
+                return True
+            logger.warning("modify_order rejected", result=str(raw_result)[:300])
             return False
         except Exception as e:
             logger.warning("modify_order_sync failed", oid=modify.oid, error=str(e))
             return False
 
+    def bulk_modify_orders(self, modifies: list[ModifyRequest]) -> bool:
+        """Modify multiple open orders in a single signed batch request.
+
+        Uses Exchange.bulk_modify_orders_new() — one nonce for the entire batch,
+        eliminating the duplicate-nonce error that occurred when concurrent
+        individual modify_order() calls all fired within the same millisecond.
+        """
+        if not modifies:
+            return True
+        if not hasattr(self._exchange, "bulk_modify_orders_new"):
+            # Fallback: sequential individual modifies (no nonce collisions since sequential)
+            logger.warning("SDK lacks bulk_modify_orders_new; falling back to sequential modify")
+            results = [self.modify_order_sync(m) for m in modifies]
+            return any(results)
+        try:
+            sdk_modifies: list[dict[str, Any]] = []
+            for m in modifies:
+                sdk_modifies.append({
+                    "oid": int(m.oid),
+                    "order": {
+                        "coin": self._asset,
+                        "is_buy": m.is_buy,
+                        "sz": float(m.size),
+                        "limit_px": float(m.price),
+                        "order_type": {"limit": {"tif": "Alo"}},
+                        "reduce_only": False,
+                    },
+                })
+            raw_result: Any = self._exchange.bulk_modify_orders_new(sdk_modifies)
+            if not isinstance(raw_result, dict):
+                logger.warning("bulk_modify_orders_new returned non-dict", result=str(raw_result)[:200])
+                return False
+            if raw_result.get("status") == "err":
+                logger.warning("bulk_modify_orders_new exchange error", error=str(raw_result.get("response", ""))[:300])
+                return False
+            statuses: list[Any] = (
+                raw_result.get("response", {})
+                .get("data", {})
+                .get("statuses", [])
+            )
+            error_msgs = [s.get("error", "") for s in statuses if isinstance(s, dict) and "error" in s]
+            failed = len(error_msgs)
+            total = len(statuses) if statuses else len(modifies)
+            if failed == total:
+                logger.warning(
+                    "bulk_modify: all modifies failed",
+                    failed=failed,
+                    total=total,
+                    errors=error_msgs[:3],  # log first 3 errors to diagnose
+                )
+                return False
+            if failed > 0:
+                logger.warning(
+                    "bulk_modify: partial failures (continuing)",
+                    failed=failed,
+                    total=total,
+                    errors=error_msgs[:3],
+                )
+            else:
+                logger.debug("bulk_modify OK", count=total)
+            return True
+        except Exception as e:
+            logger.error("bulk_modify_orders failed", error=str(e))
+            return False
+
     async def async_bulk_modify_orders(self, modifies: list[ModifyRequest]) -> bool:
-        """Concurrently modify multiple open orders in place. Returns True if all succeeded."""
+        """Async wrapper for bulk_modify_orders — runs in thread pool with timeout."""
         if not modifies:
             return True
         loop = asyncio.get_event_loop()
-        tasks = [loop.run_in_executor(None, self.modify_order_sync, m) for m in modifies]
-        results: list[bool] = list(await asyncio.gather(*tasks))
-        failed = sum(1 for r in results if not r)
-        if failed:
-            logger.warning("bulk_modify: some modifies failed", failed=failed, total=len(modifies))
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self.bulk_modify_orders, modifies),
+                timeout=12.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("async_bulk_modify_orders timed out after 12s — treating as failed")
             return False
-        logger.debug("bulk_modify OK", count=len(modifies))
-        return True
 
     # ── Async wrappers (run sync SDK calls in thread pool, non-blocking) ──────
+    # All wrappers enforce a hard timeout so a slow exchange API call never
+    # blocks the asyncio event loop for more than _EXCHANGE_TIMEOUT_S seconds.
+
+    _EXCHANGE_TIMEOUT_S = 12.0  # max seconds to wait for any single exchange call
 
     async def async_get_user_state(self) -> UserState:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.get_user_state)
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self.get_user_state),
+                timeout=self._EXCHANGE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("async_get_user_state timed out — returning empty state")
+            return UserState(
+                usdc_balance=Decimal("0"), xmr_balance=Decimal("0"),
+                usdc_available=Decimal("0"), xmr_available=Decimal("0"),
+                open_orders=[],
+            )
 
     async def async_get_l2_book(self, asset: str | None = None) -> L2Book:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.get_l2_book, asset)
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self.get_l2_book, asset),
+                timeout=self._EXCHANGE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("async_get_l2_book timed out — returning empty book")
+            return L2Book(bids=[], asks=[])
 
     async def async_bulk_place_orders(self, orders: list[OrderRequest]) -> list[OrderResponse]:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.bulk_place_orders, orders)
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self.bulk_place_orders, orders),
+                timeout=self._EXCHANGE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.error("async_bulk_place_orders timed out after 12s — orders may or may not have been placed")
+            return []
 
     async def async_bulk_cancel_orders(self, oids: list[str]) -> bool:
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.bulk_cancel_orders, oids)
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self.bulk_cancel_orders, oids),
+                timeout=self._EXCHANGE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.error("async_bulk_cancel_orders timed out after 12s")
+            return False
 
     def bulk_cancel_orders(self, oids: list[str]) -> bool:
         """Cancel multiple orders by oid."""
@@ -349,7 +473,15 @@ class HyperliquidClient:
             )
             failed = [s for s in statuses if s != "success" and not isinstance(s, str)]
             if failed:
-                logger.warning("Some cancels failed", failed=failed, total=len(oids))
+                # "already canceled, or filled" is expected when a fill races the cancel — log at debug
+                real_failures = [
+                    s for s in failed
+                    if not (isinstance(s, dict) and "already canceled, or filled" in s.get("error", ""))
+                ]
+                if real_failures:
+                    logger.warning("Some cancels failed", failed=real_failures, total=len(oids))
+                else:
+                    logger.debug("Cancel: orders already filled/cancelled (fill race)", count=len(failed))
             else:
                 logger.debug("Bulk cancel OK", count=len(oids))
             return True

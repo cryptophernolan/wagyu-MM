@@ -53,7 +53,12 @@ class HyperliquidWsClient:
         backoff = 1.0
         while self._running:
             try:
-                async with websockets.connect(self._ws_url) as ws:
+                # Disable library-level ping — Hyperliquid uses application-level
+                # keepalive. We send {"method": "ping"} every 30 s of inactivity.
+                async with websockets.connect(
+                    self._ws_url,
+                    ping_interval=None,
+                ) as ws:
                     backoff = 1.0
                     # Subscribe to authenticated channels
                     for channel in ["orderUpdates", "userFills"]:
@@ -69,14 +74,17 @@ class HyperliquidWsClient:
                         "HyperliquidWsClient connected",
                         wallet=self._wallet_address[:10],
                     )
-                    async for raw in ws:
-                        if not self._running:
-                            break
+                    while self._running:
                         try:
-                            msg: dict[str, Any] = json.loads(raw)
-                            await self._dispatch(msg)
-                        except json.JSONDecodeError:
-                            pass
+                            raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                            try:
+                                msg: dict[str, Any] = json.loads(raw)
+                                await self._dispatch(msg)
+                            except json.JSONDecodeError:
+                                pass
+                        except asyncio.TimeoutError:
+                            # No message for 30 s — send app-level ping to keep alive
+                            await ws.send(json.dumps({"method": "ping"}))
             except (ConnectionClosed, OSError, asyncio.TimeoutError) as e:
                 if not self._running:
                     break

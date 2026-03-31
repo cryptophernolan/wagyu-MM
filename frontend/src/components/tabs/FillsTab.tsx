@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { fetchFills } from "@/lib/api";
-import { formatRelativeTime } from "@/lib/formatters";
+import { formatTimestampGMT7, formatRelativeTime } from "@/lib/formatters";
 
 export function FillsTab(): React.JSX.Element {
   const [page, setPage] = useState(1);
@@ -38,7 +38,9 @@ export function FillsTab(): React.JSX.Element {
             <tbody>
               {fills.map((fill) => (
                 <tr key={fill.id} className="border-b border-zinc-800 last:border-b-0 hover:bg-zinc-800/50">
-                  <td className="px-4 py-2 text-zinc-400 text-xs">{formatRelativeTime(fill.timestamp)}</td>
+                  <td className="px-4 py-2 text-zinc-400 text-xs" title={formatRelativeTime(fill.timestamp)}>
+                    {formatTimestampGMT7(fill.timestamp)}
+                  </td>
                   <td className="px-4 py-2">
                     <span className={`px-2 py-0.5 rounded text-xs font-bold ${fill.side === "buy" ? "bg-green-900 text-green-300" : "bg-red-900 text-red-300"}`}>
                       {fill.side.toUpperCase()}

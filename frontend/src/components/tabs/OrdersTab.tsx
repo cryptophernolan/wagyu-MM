@@ -1,8 +1,15 @@
 "use client";
-import { useBotStore } from "@/store/botStore";
+import { useQuery } from "@tanstack/react-query";
+import { fetchOrders } from "@/lib/api";
 
 export function OrdersTab(): React.JSX.Element {
-  const orders = useBotStore((s) => s.openOrders);
+  const { data } = useQuery({
+    queryKey: ["orders"],
+    queryFn: fetchOrders,
+    refetchInterval: 3000,
+  });
+
+  const orders = data?.items ?? [];
 
   return (
     <div className="p-4">

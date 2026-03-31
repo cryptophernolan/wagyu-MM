@@ -81,23 +81,80 @@ class OrderIntegrityAgent(BaseAgent):
                 details={"local_count": local_count, "error": str(e)},
             )
 
-        # Ghost orders: bot thinks orders exist but exchange has none
+        # Ghost orders: bot thinks orders exist but exchange has none.
+        # Auto-reconcile: clear the stale local state and force a fresh quote
+        # placement on the next cycle so the bot heals without manual intervention.
         if local_count > 0 and exchange_count == 0:
+            cleared = self._order_manager.clear_local_orders()
+            if cleared > 0:
+                # Genuine ghost — local state was stale, force fresh placement
+                self._bot.force_refresh()
+                return AgentReport(
+                    agent=self.name,
+                    status="CRITICAL",
+                    message=(
+                        f"Ghost orders detected: bot tracked {local_count} orders but exchange "
+                        f"has 0 — local state cleared, fresh quotes will be placed next cycle."
+                    ),
+                    details={
+                        "local_count": local_count,
+                        "exchange_count": exchange_count,
+                        "local_oids": [o.oid for o in local_orders],
+                        "action": "auto_reconciled",
+                    },
+                )
+            # cleared == 0 means WS already removed orders before we got here — harmless race
             return AgentReport(
                 agent=self.name,
-                status="CRITICAL",
-                message=(
-                    f"Ghost orders detected: bot tracks {local_count} orders but exchange "
-                    f"has 0. WebSocket may have missed fill/cancel events."
-                ),
-                details={
-                    "local_count": local_count,
-                    "exchange_count": exchange_count,
-                    "local_oids": [o.oid for o in local_orders],
-                },
+                status="OK",
+                message="Orders consistent — transient count spike resolved by WS events",
+                details={"local_count": 0, "exchange_count": 0},
             )
 
-        # Significant mismatch — allow difference of 1 for fill race conditions
+        # Excess exchange orders: exchange has more orders than locally tracked.
+        # These are stale orders the bot no longer knows about (from a previous
+        # cancel+replace race or a missed placement response). Cancel them to
+        # prevent quote duplication and unexpected inventory changes.
+        if exchange_count > local_count:
+            mismatch = exchange_count - local_count
+            if mismatch > 1:
+                local_oids = {o.oid for o in local_orders}
+                stale_oids = [
+                    str(o.get("oid", ""))
+                    for o in exchange_asset_orders
+                    if str(o.get("oid", "")) not in local_oids
+                ]
+                if stale_oids:
+                    try:
+                        await loop.run_in_executor(
+                            None, self._client.bulk_cancel_orders, stale_oids
+                        )
+                        return AgentReport(
+                            agent=self.name,
+                            status="WARN",
+                            message=(
+                                f"Excess exchange orders cancelled: exchange had {exchange_count}, "
+                                f"local tracks {local_count} — removed {len(stale_oids)} untracked orders."
+                            ),
+                            details={
+                                "local_count": local_count,
+                                "exchange_count": exchange_count,
+                                "cancelled_oids": stale_oids,
+                            },
+                        )
+                    except Exception as e:
+                        return AgentReport(
+                            agent=self.name,
+                            status="WARN",
+                            message=f"Excess orders detected but cancel failed: {e}",
+                            details={
+                                "local_count": local_count,
+                                "exchange_count": exchange_count,
+                                "stale_oids": stale_oids,
+                            },
+                        )
+
+        # Allow difference of ±1 for normal fill race conditions
         mismatch = abs(local_count - exchange_count)
         if mismatch > 1:
             return AgentReport(

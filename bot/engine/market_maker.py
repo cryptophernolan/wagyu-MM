@@ -170,6 +170,10 @@ class MarketMaker:
             self._client.invalidate_user_state_cache()  # Force fresh balance on next cycle
             self._force_refresh = True  # Inventory changed → bypass dead-band next cycle
             self._state.fills_count += 1
+            # Eagerly remove from local order tracking — orderUpdates may arrive late,
+            # causing modify attempts on an already-filled oid (duplicate-nonce / ghost order)
+            if oid:
+                self._order_manager.remove_order(oid)
 
             fair = float(self._fair_price)
             _save_task = asyncio.create_task(
@@ -216,7 +220,7 @@ class MarketMaker:
         # Cancel any stale orders from previous sessions before starting
         cancelled = await self._order_manager.cancel_all_exchange_orders()
         if cancelled > 0:
-            logger.info("Cleared stale orders from previous session", count=cancelled)
+            logger.info("Cancelled stale exchange orders on startup", count=cancelled)
             await asyncio.sleep(1.0)  # Allow exchange to release held balance
 
         # Wait for a valid price before setting initial portfolio (up to 10s)
@@ -232,6 +236,23 @@ class MarketMaker:
         initial_portfolio = user_state.usdc_balance + user_state.xmr_balance * self._fair_price
         self._risk_manager.set_session_start_portfolio(initial_portfolio)
         logger.info("Session start portfolio", value=float(initial_portfolio), fair_price=float(self._fair_price))
+
+        # Auto-seed HODL benchmark on first run so BotVsHODL chart works without
+        # requiring the user to manually run scripts/set_benchmark.py
+        existing_benchmark = await repository.get_hodl_benchmark()
+        if existing_benchmark is None and self._fair_price > Decimal("0"):
+            await repository.save_hodl_benchmark({
+                "timestamp": datetime.now(timezone.utc),
+                "xmr_price": float(self._fair_price),
+                "usdc_balance": float(user_state.usdc_balance),
+                "xmr_balance": float(user_state.xmr_balance),
+            })
+            logger.info(
+                "Auto-seeded HODL benchmark",
+                xmr_price=float(self._fair_price),
+                usdc=float(user_state.usdc_balance),
+                xmr=float(user_state.xmr_balance),
+            )
 
         self._state.state = "RUNNING"
         logger.info("MarketMaker running")
@@ -263,6 +284,10 @@ class MarketMaker:
         raw_price = self._aggregator.get_price()
         if raw_price is None:
             logger.warning("No price available, skipping cycle")
+            # Update cycle timestamp so watchdog doesn't fire false CRITICAL alerts
+            # during brief feed outages. Risk manager handles cancel-on-stale-feed
+            # separately via its HALT mechanism.
+            self._state.last_cycle_time = datetime.now(timezone.utc)
             return
 
         self._fair_price = Decimal(str(round(raw_price, 6)))
@@ -275,10 +300,21 @@ class MarketMaker:
         inv_ratio = self._inventory.inventory_ratio(max_pos)
         inv_skew = self._inventory.compute_skew(max_pos, self._config.inventory.skew_factor)
 
-        # 3. Compute PnL and portfolio value (async — non-blocking, uses cache)
+        # 3. Compute PnL and portfolio value — fetch user_state + l2_book in parallel
+        # to avoid two sequential round-trips when exchange is slow.
         realized_pnl = self._inventory.realized_pnl
         unrealized_pnl = self._inventory.compute_unrealized_pnl(self._fair_price)
-        user_state = await self._client.async_get_user_state()
+        should_refresh = self._should_refresh(self._fair_price)
+
+        if should_refresh and self._state.quoting_enabled and self._state.wagyu_enabled:
+            user_state, l2_book = await asyncio.gather(
+                self._client.async_get_user_state(),
+                self._client.async_get_l2_book(),
+            )
+        else:
+            user_state = await self._client.async_get_user_state()
+            l2_book = None
+
         # Use actual wallet balances for portfolio value (not session-tracked inventory)
         # so drawdown check works correctly across restarts.
         portfolio_value = user_state.usdc_balance + user_state.xmr_balance * self._fair_price
@@ -309,9 +345,9 @@ class MarketMaker:
                 self._last_quoted_price = Decimal("0")  # Force fresh quotes on re-enable
         else:
             # 5a. Dead-band gate: skip order refresh if price hasn't moved enough
-            should_refresh = self._should_refresh(self._fair_price)
             if should_refresh:
-                l2_book = await self._client.async_get_l2_book()
+                if l2_book is None:
+                    l2_book = await self._client.async_get_l2_book()
                 l2_bids = [(b.price, b.size) for b in l2_book.bids]
                 l2_asks = [(a.price, a.size) for a in l2_book.asks]
 
@@ -416,6 +452,15 @@ class MarketMaker:
                 "alerts": s.alerts[-10:],
             },
         }
+
+    def force_refresh(self) -> None:
+        """Signal that quotes must be refreshed on the next cycle.
+
+        Called by agents (e.g. OrderIntegrityAgent) to trigger immediate
+        re-quoting after auto-reconciliation without waiting for the dead-band.
+        """
+        self._force_refresh = True
+        self._last_quoted_price = Decimal("0")
 
     def stop(self) -> None:
         self._running = False

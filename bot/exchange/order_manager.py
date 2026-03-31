@@ -40,9 +40,26 @@ class OrderManager:
         return list(self._open_orders.values())
 
     async def place_quotes(self, quote_set: QuoteSet, fair_price: Decimal) -> int:
-        """Place all quotes from a QuoteSet. Returns count of placed orders."""
+        """Place all quotes from a QuoteSet. Returns count of placed orders.
+
+        Skips levels that would exceed available spot balance to prevent
+        'Insufficient spot balance' rejections from the exchange.
+        """
+        user_state = await self._client.async_get_user_state()
+        avail_usdc = user_state.usdc_available
+        avail_xmr = user_state.xmr_available
+
         requests: list[OrderRequest] = []
         for level in quote_set.bids:
+            cost = level.price * level.size
+            if cost > avail_usdc:
+                logger.debug(
+                    "Skipping bid level: insufficient USDC",
+                    needed=float(cost),
+                    available=float(avail_usdc),
+                )
+                continue
+            avail_usdc -= cost
             requests.append(
                 OrderRequest(
                     side="buy",
@@ -52,6 +69,14 @@ class OrderManager:
                 )
             )
         for level in quote_set.asks:
+            if level.size > avail_xmr:
+                logger.debug(
+                    "Skipping ask level: insufficient XMR",
+                    needed=float(level.size),
+                    available=float(avail_xmr),
+                )
+                continue
+            avail_xmr -= level.size
             requests.append(
                 OrderRequest(
                     side="sell",
@@ -150,8 +175,12 @@ class OrderManager:
             # Modify failed — fall through to cancel+replace
             logger.debug("modify_or_replace: modify failed, falling back to cancel+replace")
 
-        # Standard cancel+replace path
-        await self.cancel_all()
+        # Standard cancel+replace path.
+        # Use cancel_all_exchange_orders() (fetches ALL exchange orders) rather than
+        # cancel_all() (only locally tracked oids). Fill events can partially clear
+        # _open_orders between cycles, leaving untracked resting orders on the exchange
+        # that consume balance and accumulate over time.
+        await self.cancel_all_exchange_orders()
         return await self.place_quotes(quote_set, fair_price)
 
     async def cancel_all(self) -> int:
@@ -164,6 +193,8 @@ class OrderManager:
             for oid in oids:
                 await repository.update_order_status(oid, "cancelled")
             self._open_orders.clear()
+            # Invalidate balance cache so subsequent place_quotes() sees freed hold
+            self._client.invalidate_user_state_cache()
             logger.debug("Cancelled all orders", count=len(oids))
             return len(oids)
         return 0
@@ -176,16 +207,38 @@ class OrderManager:
             if not stale_oids:
                 return 0
             await self._client.async_bulk_cancel_orders(stale_oids)
+            self._client.invalidate_user_state_cache()
             self._open_orders.clear()
-            logger.info("Cancelled stale exchange orders on startup", count=len(stale_oids))
+            logger.debug("Cancelled all exchange orders", count=len(stale_oids))
             return len(stale_oids)
         except Exception as e:
             logger.warning("cancel_all_exchange_orders failed", error=str(e))
             return 0
 
+    def clear_local_orders(self) -> int:
+        """Clear locally tracked orders without touching the exchange.
+
+        Returns the number of orders cleared. Used by OrderIntegrityAgent to
+        recover from ghost-order state. Returns 0 if already empty (harmless race).
+        """
+        count = len(self._open_orders)
+        self._open_orders.clear()
+        if count > 0:
+            logger.warning("Local order state cleared (ghost order recovery)", count=count)
+        return count
+
+    def remove_order(self, oid: str) -> None:
+        """Remove a single order from local tracking (e.g. on fill event)."""
+        self._open_orders.pop(oid, None)
+
     def on_order_update(self, event: dict[str, Any]) -> None:
-        """Process an order update event from WebSocket."""
-        oid = str(event.get("oid", ""))
+        """Process an order update event from WebSocket.
+
+        Hyperliquid orderUpdates nests oid under event["order"]["oid"],
+        not at the top level. We check both locations for robustness.
+        """
+        order_data: dict[str, Any] = event.get("order", {}) if isinstance(event.get("order"), dict) else {}
+        oid = str(order_data.get("oid", "") or event.get("oid", ""))
         status: str = str(event.get("status", ""))
         if not oid:
             return
