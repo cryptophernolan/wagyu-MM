@@ -360,11 +360,14 @@ class MarketMaker:
                     l2_bids=l2_bids,
                     l2_asks=l2_asks,
                 )
-                # 5b. Use modify-in-place when possible (saves ~50% API ops vs cancel+place)
+                # 5b. Use modify-in-place when possible (saves ~50% API ops vs cancel+place).
+                # Pass user_state so the fallback cancel+replace path can skip redundant
+                # exchange fetches (eliminates the 25-30s event loop stall on slow API).
                 await self._order_manager.modify_or_replace_quotes(
                     quote_set,
                     self._fair_price,
                     use_modify=self._config.rate_limit.use_order_modify,
+                    user_state=user_state,
                 )
                 self._last_quoted_price = self._fair_price
                 self._last_refresh_time = time.monotonic()

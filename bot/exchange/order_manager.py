@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 from bot.engine.algorithms.base import QuoteSet
-from bot.exchange.hyperliquid_client import HyperliquidClient, ModifyRequest, OrderRequest
+from bot.exchange.hyperliquid_client import HyperliquidClient, ModifyRequest, OrderRequest, UserState
 from bot.persistence import repository
 from bot.utils.logger import get_logger
 
@@ -39,13 +39,22 @@ class OrderManager:
     def get_open_orders(self) -> list[TrackedOrder]:
         return list(self._open_orders.values())
 
-    async def place_quotes(self, quote_set: QuoteSet, fair_price: Decimal) -> int:
+    async def place_quotes(
+        self,
+        quote_set: QuoteSet,
+        fair_price: Decimal,
+        user_state: UserState | None = None,
+    ) -> int:
         """Place all quotes from a QuoteSet. Returns count of placed orders.
 
         Skips levels that would exceed available spot balance to prevent
         'Insufficient spot balance' rejections from the exchange.
+
+        Pass ``user_state`` when the caller already has a fresh state to avoid
+        an extra round-trip to the exchange.
         """
-        user_state = await self._client.async_get_user_state()
+        if user_state is None:
+            user_state = await self._client.async_get_user_state()
         avail_usdc = user_state.usdc_available
         avail_xmr = user_state.xmr_available
 
@@ -126,11 +135,16 @@ class OrderManager:
         quote_set: QuoteSet,
         fair_price: Decimal,
         use_modify: bool = True,
+        user_state: UserState | None = None,
     ) -> int:
         """Place quotes using modify-in-place when possible, else cancel+replace.
 
         Modify-in-place uses 1 API op per order (vs 2 for cancel+place), saving
         ~50% of Hyperliquid order weight budget per refresh cycle.
+
+        Pass ``user_state`` (already fetched in the calling cycle) so the fallback
+        cancel+replace path can skip redundant exchange fetches and avoid stalling
+        the event loop for 25-30 s when the API is slow.
 
         Falls back to cancel+replace when:
         - use_modify is False (config opt-out)
@@ -176,12 +190,24 @@ class OrderManager:
             logger.debug("modify_or_replace: modify failed, falling back to cancel+replace")
 
         # Standard cancel+replace path.
-        # Use cancel_all_exchange_orders() (fetches ALL exchange orders) rather than
-        # cancel_all() (only locally tracked oids). Fill events can partially clear
-        # _open_orders between cycles, leaving untracked resting orders on the exchange
-        # that consume balance and accumulate over time.
-        await self.cancel_all_exchange_orders()
-        return await self.place_quotes(quote_set, fair_price)
+        # Use cancel_all() (locally tracked oids) to avoid an extra exchange GET
+        # in the hot path. Any untracked resting orders are cleaned up every 30 s
+        # by OrderIntegrityAgent's cancel_all_exchange_orders call.
+        await self.cancel_all()
+
+        # Re-use the caller-provided user_state to skip one more round-trip.
+        # After cancel, held amounts are freed, so available = total balance.
+        # If user_state is unavailable, place_quotes fetches fresh.
+        freed_state: UserState | None = None
+        if user_state is not None:
+            freed_state = UserState(
+                usdc_balance=user_state.usdc_balance,
+                xmr_balance=user_state.xmr_balance,
+                usdc_available=user_state.usdc_balance,   # holds cleared by cancel
+                xmr_available=user_state.xmr_balance,    # holds cleared by cancel
+                open_orders=[],
+            )
+        return await self.place_quotes(quote_set, fair_price, user_state=freed_state)
 
     async def cancel_all(self) -> int:
         """Cancel all tracked open orders. Returns count cancelled."""
@@ -200,10 +226,14 @@ class OrderManager:
         return 0
 
     async def cancel_all_exchange_orders(self) -> int:
-        """Cancel ALL open orders on the exchange (including from previous sessions)."""
+        """Cancel ALL open orders on the exchange (including from previous sessions).
+
+        Uses async_get_open_orders (1 HTTP call) instead of async_get_user_state
+        (2 HTTP calls) since we only need the oid list here.
+        """
         try:
-            user_state = await self._client.async_get_user_state()
-            stale_oids = [str(o["oid"]) for o in user_state.open_orders]
+            raw_orders = await self._client.async_get_open_orders()
+            stale_oids = [str(o["oid"]) for o in raw_orders]
             if not stale_oids:
                 return 0
             await self._client.async_bulk_cancel_orders(stale_oids)

@@ -406,7 +406,19 @@ class HyperliquidClient:
     # All wrappers enforce a hard timeout so a slow exchange API call never
     # blocks the asyncio event loop for more than _EXCHANGE_TIMEOUT_S seconds.
 
-    _EXCHANGE_TIMEOUT_S = 12.0  # max seconds to wait for any single exchange call
+    _EXCHANGE_TIMEOUT_S = 8.0  # max seconds to wait for any single exchange call
+
+    async def async_get_open_orders(self) -> list[dict[str, Any]]:
+        """Async wrapper for get_open_orders — fetches open order list only (1 HTTP call)."""
+        loop = asyncio.get_event_loop()
+        try:
+            return await asyncio.wait_for(
+                loop.run_in_executor(None, self.get_open_orders),
+                timeout=self._EXCHANGE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("async_get_open_orders timed out — returning empty list")
+            return []
 
     async def async_get_user_state(self) -> UserState:
         loop = asyncio.get_event_loop()
