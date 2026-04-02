@@ -52,8 +52,14 @@ class ExchangeProbeAgent(BaseAgent):
         start = time.monotonic()
         try:
             loop = asyncio.get_event_loop()
-            # get_open_orders is a lightweight /info POST — no auth required
-            await loop.run_in_executor(None, self._client.get_open_orders)
+            # get_open_orders is a lightweight /info POST — no auth required.
+            # Hard cap at 15 s so a drip-feeding server never occupies a thread
+            # pool slot indefinitely (requests timeout=10 is per-socket-op, not
+            # total, so a slow server can stall for minutes without this guard).
+            await asyncio.wait_for(
+                loop.run_in_executor(None, self._client.get_open_orders),
+                timeout=15.0,
+            )
             latency_ms = (time.monotonic() - start) * 1000
 
             if latency_ms >= self._CRITICAL_MS:
@@ -79,6 +85,14 @@ class ExchangeProbeAgent(BaseAgent):
                 details={"latency_ms": round(latency_ms, 1)},
             )
 
+        except asyncio.TimeoutError:
+            latency_ms = (time.monotonic() - start) * 1000
+            return AgentReport(
+                agent=self.name,
+                status="CRITICAL",
+                message=f"Exchange API critically slow: {latency_ms:.0f}ms (probe timed out after 15s)",
+                details={"latency_ms": round(latency_ms, 1)},
+            )
         except Exception as e:
             latency_ms = (time.monotonic() - start) * 1000
             return AgentReport(

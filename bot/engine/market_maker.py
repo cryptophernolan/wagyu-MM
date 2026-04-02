@@ -265,6 +265,10 @@ class MarketMaker:
                 except Exception as e:
                     logger.error("Cycle error", error=str(e))
                     self._state.alerts.append(f"Cycle error: {e}")
+                    # Always update last_cycle_time so the watchdog doesn't
+                    # report a false stall when run_cycle raises before reaching
+                    # its own last_cycle_time update.
+                    self._state.last_cycle_time = datetime.now(timezone.utc)
 
                 elapsed = time.monotonic() - cycle_start
                 sleep_time = max(0.0, self._config.trading.cycle_interval_seconds - elapsed)
@@ -332,6 +336,7 @@ class MarketMaker:
             # Use risk_result.reason for transient halts (stale feed); manager.halt_reason for permanent
             self._state.halt_reason = self._risk_manager.halt_reason or risk_result.reason
             self._state.fair_price = float(self._fair_price)  # Show price even when halted
+            self._state.last_cycle_time = datetime.now(timezone.utc)  # Keep watchdog from false-alerting
             await self._order_manager.cancel_all()
             self._last_quoted_price = Decimal("0")  # Force fresh quotes on un-halt
             self._emit(self._build_state_event())

@@ -62,17 +62,27 @@ class OrderIntegrityAgent(BaseAgent):
         local_orders = self._order_manager.get_open_orders()
         local_count = len(local_orders)
 
-        # Fetch actual open orders from exchange REST API (blocking → run in executor)
+        # Fetch actual open orders from exchange REST API (blocking → run in executor).
+        # Hard cap at 15 s so a slow exchange never occupies a thread pool slot
+        # indefinitely (requests timeout=10 is per-socket-op, not total).
         try:
             loop = asyncio.get_event_loop()
-            exchange_orders: list[dict] = await loop.run_in_executor(
-                None, self._client.get_open_orders
+            exchange_orders: list[dict] = await asyncio.wait_for(
+                loop.run_in_executor(None, self._client.get_open_orders),
+                timeout=15.0,
             )
             # Filter to our asset only to avoid counting other pairs
             exchange_asset_orders = [
                 o for o in exchange_orders if o.get("coin", "") == self._asset
             ]
             exchange_count = len(exchange_asset_orders)
+        except asyncio.TimeoutError:
+            return AgentReport(
+                agent=self.name,
+                status="WARN",
+                message="Cannot verify orders — exchange query timed out (>15s)",
+                details={"local_count": local_count},
+            )
         except Exception as e:
             return AgentReport(
                 agent=self.name,
@@ -126,8 +136,11 @@ class OrderIntegrityAgent(BaseAgent):
                 ]
                 if stale_oids:
                     try:
-                        await loop.run_in_executor(
-                            None, self._client.bulk_cancel_orders, stale_oids
+                        await asyncio.wait_for(
+                            loop.run_in_executor(
+                                None, self._client.bulk_cancel_orders, stale_oids
+                            ),
+                            timeout=15.0,
                         )
                         return AgentReport(
                             agent=self.name,
