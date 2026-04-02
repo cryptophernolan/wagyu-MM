@@ -343,6 +343,15 @@ class MarketMaker:
             return
 
         # 5. Manage quotes: cancel if disabled, or refresh if dead-band crossed / fill received
+        # If the exchange cumulative rate limit is active, skip order placement this cycle
+        # to avoid incrementing the counter further while we're already over quota.
+        if self._client.is_cumulative_rate_limited():
+            remaining = self._client._cumulative_rl_until - time.monotonic()
+            logger.debug("Skipping quotes: cumulative rate limit active", remaining_s=round(remaining, 1))
+            self._state.last_cycle_time = datetime.now(timezone.utc)
+            self._emit(self._build_state_event())
+            return
+
         if not self._state.quoting_enabled or not self._state.wagyu_enabled:
             # Quoting just toggled off — cancel any resting orders
             cancelled = await self._order_manager.cancel_all()

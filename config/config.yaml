@@ -42,9 +42,10 @@ volatility:
 
 rate_limit:
   # Only refresh orders when fair price moves beyond this threshold (bps).
-  # 5 bps ≈ 200-500 refreshes/day on XMR1 → well within 10,000 op/day limit.
-  deadband_bps: 5.0
+  # Raised to 15 bps to reduce cumulative order ops vs volume ratio.
+  # Hyperliquid limit: ~2.07 ops/USDC traded; bot was at 2.38 (over by 14.7%).
+  deadband_bps: 15.0
   # Force-refresh at least every N seconds even if price is flat (safety fallback).
-  max_refresh_interval_seconds: 60.0
+  max_refresh_interval_seconds: 120.0
   # Use modify-in-place (saves 50% ops vs cancel+replace). Set false if SDK errors.
   use_order_modify: true

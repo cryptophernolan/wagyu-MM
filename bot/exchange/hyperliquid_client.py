@@ -231,9 +231,36 @@ class HyperliquidClient:
                 open_orders=[],
             )
 
+    # Cumulative rate-limit back-off: when Hyperliquid rejects orders because the
+    # account has sent too many ops relative to volume traded, we back off for
+    # _CUMULATIVE_RL_BACKOFF_S seconds to avoid hammering the counter further.
+    # (0.0 means "not rate-limited"; set to monotonic() + backoff on detection.)
+    _cumulative_rl_until: float = 0.0
+    _CUMULATIVE_RL_BACKOFF_S: float = 60.0
+    _CUMULATIVE_RL_MSG = "Too many cumulative requests sent"
+
+    def is_cumulative_rate_limited(self) -> bool:
+        """Return True while the cumulative order-op rate limit back-off is active."""
+        return time.monotonic() < self._cumulative_rl_until
+
+    def _handle_cumulative_rl(self, error_msg: str) -> bool:
+        """If error is the cumulative rate-limit, activate back-off and return True."""
+        if self._CUMULATIVE_RL_MSG in error_msg:
+            self._cumulative_rl_until = time.monotonic() + self._CUMULATIVE_RL_BACKOFF_S
+            logger.warning(
+                "Cumulative order-op rate limit hit — pausing order placement",
+                backoff_seconds=self._CUMULATIVE_RL_BACKOFF_S,
+                error=error_msg[:200],
+            )
+            return True
+        return False
+
     def bulk_place_orders(self, orders: list[OrderRequest]) -> list[OrderResponse]:
         """Place multiple orders in one signed request (ALO/post-only)."""
         if not orders:
+            return []
+        if self.is_cumulative_rate_limited():
+            logger.debug("bulk_place_orders: cumulative rate limit active, skipping")
             return []
         try:
             order_specs: list[dict[str, Any]] = []
@@ -253,7 +280,9 @@ class HyperliquidClient:
             result: dict[str, Any] = raw_result
             # Check for top-level error (e.g. rate-limit: response is a string, not dict)
             if result.get("status") == "err":
-                logger.warning("bulk_orders exchange error", error=str(result.get("response", ""))[:300])
+                error_msg = str(result.get("response", ""))
+                self._handle_cumulative_rl(error_msg)
+                logger.warning("bulk_orders exchange error", error=error_msg[:300])
                 return []
             response_field: Any = result.get("response", {})
             if not isinstance(response_field, dict):
