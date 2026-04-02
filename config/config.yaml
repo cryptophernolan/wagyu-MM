@@ -42,10 +42,11 @@ volatility:
 
 rate_limit:
   # Only refresh orders when fair price moves beyond this threshold (bps).
-  # Raised to 15 bps to reduce cumulative order ops vs volume ratio.
-  # Hyperliquid limit: ~2.07 ops/USDC traded; bot was at 2.38 (over by 14.7%).
-  deadband_bps: 15.0
-  # Force-refresh at least every N seconds even if price is flat (safety fallback).
-  max_refresh_interval_seconds: 120.0
+  # Raised to 25 bps: reduces voluntary refreshes ~5x vs original 5 bps.
+  # Hyperliquid cumulative limit: ~2.07 ops/USDC; account is 14%+ over.
+  deadband_bps: 25.0
+  # Force-refresh at most every 10 minutes when price is flat.
+  # Minimises ops/day while still keeping quotes from going completely stale.
+  max_refresh_interval_seconds: 600.0
   # Use modify-in-place (saves 50% ops vs cancel+replace). Set false if SDK errors.
   use_order_modify: true

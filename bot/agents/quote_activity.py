@@ -1,6 +1,8 @@
 """Quote Activity Agent — detects quoting enabled but no orders placed."""
 from __future__ import annotations
 
+import time
+
 from bot.agents.base_agent import AgentReport, BaseAgent, ReportCallback
 from bot.config import AppConfig
 from bot.engine.market_maker import MarketMaker
@@ -63,6 +65,17 @@ class QuoteActivityAgent(BaseAgent):
                 agent=self.name,
                 status="WARN",
                 message="Fair price is 0 — feeds may not have initialized yet",
+            )
+
+        # Intentional pause: Hyperliquid cumulative rate limit back-off
+        if state.rate_limit_backoff_until > time.monotonic():
+            remaining = round(state.rate_limit_backoff_until - time.monotonic())
+            self._zero_streak = 0  # reset streak — this is not a silent failure
+            return AgentReport(
+                agent=self.name,
+                status="WARN",
+                message=f"Order placement paused: Hyperliquid cumulative rate limit — resuming in {remaining}s",
+                details={"backoff_remaining_s": remaining},
             )
 
         if state.open_orders_count == 0:

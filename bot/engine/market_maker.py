@@ -56,6 +56,8 @@ class BotState:
     open_orders_count: int = 0
     halt_reason: str | None = None
     alerts: list[str] = field(default_factory=list)
+    # Cumulative rate limit backoff: non-zero while placement is intentionally paused
+    rate_limit_backoff_until: float = 0.0
 
 
 class MarketMaker:
@@ -349,8 +351,12 @@ class MarketMaker:
             remaining = self._client._cumulative_rl_until - time.monotonic()
             logger.debug("Skipping quotes: cumulative rate limit active", remaining_s=round(remaining, 1))
             self._state.last_cycle_time = datetime.now(timezone.utc)
+            self._state.rate_limit_backoff_until = self._client._cumulative_rl_until
             self._emit(self._build_state_event())
             return
+
+        # Clear backoff flag once we're past the rate limit window
+        self._state.rate_limit_backoff_until = 0.0
 
         if not self._state.quoting_enabled or not self._state.wagyu_enabled:
             # Quoting just toggled off — cancel any resting orders

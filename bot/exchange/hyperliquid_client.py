@@ -236,7 +236,7 @@ class HyperliquidClient:
     # _CUMULATIVE_RL_BACKOFF_S seconds to avoid hammering the counter further.
     # (0.0 means "not rate-limited"; set to monotonic() + backoff on detection.)
     _cumulative_rl_until: float = 0.0
-    _CUMULATIVE_RL_BACKOFF_S: float = 60.0
+    _CUMULATIVE_RL_BACKOFF_S: float = 300.0  # 5-minute backoff: bot is 14%+ over lifetime limit
     _CUMULATIVE_RL_MSG = "Too many cumulative requests sent"
 
     def is_cumulative_rate_limited(self) -> bool:
@@ -361,6 +361,9 @@ class HyperliquidClient:
         """
         if not modifies:
             return True
+        if self.is_cumulative_rate_limited():
+            logger.debug("bulk_modify_orders: cumulative rate limit active, skipping")
+            return False
         if not hasattr(self._exchange, "bulk_modify_orders_new"):
             # Fallback: sequential individual modifies (no nonce collisions since sequential)
             logger.warning("SDK lacks bulk_modify_orders_new; falling back to sequential modify")
@@ -385,7 +388,9 @@ class HyperliquidClient:
                 logger.warning("bulk_modify_orders_new returned non-dict", result=str(raw_result)[:200])
                 return False
             if raw_result.get("status") == "err":
-                logger.warning("bulk_modify_orders_new exchange error", error=str(raw_result.get("response", ""))[:300])
+                error_msg = str(raw_result.get("response", ""))
+                self._handle_cumulative_rl(error_msg)
+                logger.warning("bulk_modify_orders_new exchange error", error=error_msg[:300])
                 return False
             statuses: list[Any] = (
                 raw_result.get("response", {})
