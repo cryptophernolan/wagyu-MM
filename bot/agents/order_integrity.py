@@ -142,6 +142,9 @@ class OrderIntegrityAgent(BaseAgent):
                             ),
                             timeout=15.0,
                         )
+                        # Force a fresh quote cycle so the bot re-fills the cancelled
+                        # slots immediately rather than waiting for deadband/timer.
+                        self._bot.force_refresh()
                         return AgentReport(
                             agent=self.name,
                             status="WARN",

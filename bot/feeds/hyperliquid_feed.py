@@ -60,6 +60,10 @@ class HyperliquidFeed(PriceFeed):
                             raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
                             try:
                                 msg: dict[str, Any] = json.loads(raw)
+                                # Respond to server pings to prevent "Inactive" disconnect.
+                                if msg.get("method") == "ping":
+                                    await ws.send(json.dumps({"method": "pong"}))
+                                    continue
                                 self._handle_message(msg)
                             except (json.JSONDecodeError, KeyError) as e:
                                 logger.warning("HyperliquidFeed parse error", error=str(e))

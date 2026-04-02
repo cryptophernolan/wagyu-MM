@@ -79,6 +79,13 @@ class HyperliquidWsClient:
                             raw = await asyncio.wait_for(ws.recv(), timeout=30.0)
                             try:
                                 msg: dict[str, Any] = json.loads(raw)
+                                # Respond to server-initiated pings immediately.
+                                # Hyperliquid sends {"method": "ping"} and expects
+                                # {"method": "pong"} back; without this it closes
+                                # the connection with 1000 "Inactive" after ~100 s.
+                                if msg.get("method") == "ping":
+                                    await ws.send(json.dumps({"method": "pong"}))
+                                    continue
                                 await self._dispatch(msg)
                             except json.JSONDecodeError:
                                 pass
